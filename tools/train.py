@@ -1,15 +1,21 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+
 import argparse
 import logging
 import os
 import os.path as osp
-
 from mmengine.config import Config, DictAction
 from mmengine.logging import print_log
+
+from mmseg.utils import register_all_modules
+register_all_modules(init_default_scope=True)
+
 from mmengine.runner import Runner
 
 from mmseg.registry import RUNNERS
 
+import os, sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
@@ -85,7 +91,10 @@ def main():
             cfg.optim_wrapper.loss_scale = 'dynamic'
 
     # resume training
+
     cfg.resume = args.resume
+    print('[DBG] FINAL CONFIG img_path:',
+          cfg.train_dataloader.dataset.unlabeled_dataset.data_prefix)
 
     # build the runner from config
     if 'runner_type' not in cfg:

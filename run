@@ -1,0 +1,7 @@
+python tools\train_mask_ddpm_min.py --mask_root data/A/labels/train --out_dir work_dirs\mask_ddpm_min --image_size 128 --batch_size 16 --epochs 50 --amp
+
+python tools\train.py projects/pcb_conductor/configs/segformer_mt_vb.py
+
+python tools/export_ema_ckpt.py --in work_dirs/segformer_mt_vb/epoch_1.pth --out work_dirs/segformer_mt_vb/ema_teacher.pth
+
+python tools/infer_one_slide.py
