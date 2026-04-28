@@ -1,0 +1,53 @@
+⚠️ 重要: 需要手动删除的文件
+================================================================================
+
+由于技术限制，无法直接删除以下文件，请手动删除:
+
+❌ D:\LLM_Diff_CL\tools\ablation_study.py
+
+原因:
+  - 与既有的 projects/pcb_conductor/tools/run_ablations.py 功能重复
+  - 新建的 ablation_study.py (480行) 不如既有版本 (370行) 成熟和优化
+  - run_ablations.py 已针对PCB项目专门优化，功能更完整
+
+执行方式 (三选一):
+
+方法1 - Windows文件管理器:
+  1. 打开 D:\LLM_Diff_CL\tools\
+  2. 找到 ablation_study.py
+  3. 右键 -> 删除
+
+方法2 - Windows PowerShell:
+  Remove-Item -Path "D:\LLM_Diff_CL\tools\ablation_study.py"
+
+方法3 - Windows CMD:
+  del "D:\LLM_Diff_CL\tools\ablation_study.py"
+
+方法4 - 命令行 (通用):
+  python -c "import os; os.remove('D:\\LLM_Diff_CL\\tools\\ablation_study.py')"
+
+================================================================================
+
+删除后的文件结构应该是:
+
+D:\LLM_Diff_CL\tools\
+├── ✨ uncertainty_analysis.py       (NEW - 保留)
+├── ✨ structure_analysis.py         (NEW - 保留)
+├── ✅ train_continual.py            (KEEP)
+├── ✅ train_mask_ddpm_min.py        (KEEP)
+└── ... (其他既有文件)
+
+projects/pcb_conductor/tools\
+├── ✅ run_ablations.py              (KEEP - 消融研究)
+├── ✅ continual_eval.py             (KEEP)
+├── ✅ visualize_results.py          (UPDATED - 已增强)
+└── ... (其他模块)
+
+================================================================================
+
+✅ 删除完成后，项目结构将清洁无重复。
+
+其他所有新建的文档和代码都已正确放置。
+
+更多信息: 查看 FINAL_COMPLETION_REPORT.md
+================================================================================
