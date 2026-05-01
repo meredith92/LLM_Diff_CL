@@ -158,6 +158,7 @@ model = dict(
     use_selective=True,
     drop_boundary=False,  # 禁用：过度过滤了边界（PCB边界很重要）
     use_diffusion=True,
+    use_judge=False,  # The current rule-based judge masks out all B pseudo-label pixels early in training.
     u_thr=0.25,  # 提高：从 0.12 -> 0.25，允许更高的不确定性
     diff_K=8,
     diff_steps=20,
