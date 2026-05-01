@@ -4,14 +4,14 @@ import glob
 import argparse
 from dataclasses import dataclass
 from typing import List
-
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
-
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from projects.pcb_conductor.models.mask_ddpm_backbones import UNetSmall,make_beta_schedule,AttnUNet,ResUNet,CLIPTextEncoder
 # import torch
 # import torch.nn.functional as F

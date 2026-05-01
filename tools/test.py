@@ -2,6 +2,10 @@
 import argparse
 import os
 import os.path as osp
+import sys
+
+# Add repo root to path so custom modules can be imported
+sys.path.insert(0, osp.abspath(osp.join(osp.dirname(__file__), '..')))
 
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner

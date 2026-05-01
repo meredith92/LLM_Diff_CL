@@ -240,9 +240,15 @@ def pseudo_label_judge_24pins_no_equal_spacing(
 
 @MODELS.register_module()
 class MTStructContinual(EncoderDecoder):
+    """
+    Student-Teacher Continual Learning Model for Domain Adaptation.
+    
+    Architecture:
+    - Student (self): Learns Domain B (current model being trained)
+    - Teacher (self.old_model): Frozen Domain A model (preserves knowledge to prevent forgetting)
+    """
     def __init__(
         self,
-        ema=0.99,
         conf_thr=0.8,
         band_k=5,
         lam_u=1.0,
@@ -272,11 +278,12 @@ class MTStructContinual(EncoderDecoder):
         llm_uncertain_band=(0.25, 0.70),  # 只在 rule 分数不确定时才问 LLM（省开销）
         llm_timeout_ms=800,  # 你自己实现时用
         llm_every_n=50,
+        warn_on_missing_unlabeled=False,
+        missing_unlabeled_warn_streak=20,
         **kwargs
     ):
         super().__init__(**kwargs)
 
-        self.ema = ema
         self.conf_thr = conf_thr
         self.band_k = band_k
         self.lam_u = lam_u
@@ -315,11 +322,14 @@ class MTStructContinual(EncoderDecoder):
         self.llm_uncertain_band = llm_uncertain_band
         self.llm_timeout_ms = llm_timeout_ms
         self.llm_every_n = llm_every_n
+        self.warn_on_missing_unlabeled = warn_on_missing_unlabeled
+        self.missing_unlabeled_warn_streak = missing_unlabeled_warn_streak
         self._iter = 0
+        self._missing_unlabeled_streak = 0
 
         self._llm_cache = {}  # 简单缓存：key->(score, keep)
 
-        self.teacher = None
+        # Teacher model (old_model): Frozen Domain A weights, initialized via init_old_model()
         self.old_model = None
 
     def llm_judge(self, info: dict, score_rule: float):
@@ -353,12 +363,12 @@ class MTStructContinual(EncoderDecoder):
         self._llm_cache[key] = (s, usable)
         return s, usable
 
-    def init_teacher(self):
-        if self.teacher is None:
-            self.teacher = deepcopy(self)
-            self.teacher.eval()
-            for p in self.teacher.parameters():
-                p.requires_grad_(False)
+    # def init_teacher(self):
+    #     if self.teacher is None:
+    #         self.teacher = deepcopy(self)
+    #         self.teacher.eval()
+    #         for p in self.teacher.parameters():
+    #             p.requires_grad_(False)
 
     @torch.no_grad()
     def diffusion_uncertainty(self, p_t: torch.Tensor) -> torch.Tensor:
@@ -388,19 +398,48 @@ class MTStructContinual(EncoderDecoder):
         return u
 
     @torch.no_grad()
-    def ema_update(self):
-        self.init_teacher()
-        for (n_s, p_s), (n_t, p_t) in zip(self.named_parameters(), self.teacher.named_parameters()):
-            if n_s.startswith("diffusion."):
-                continue
-            p_t.data.mul_(self.ema).add_(p_s.data, alpha=(1.0 - self.ema))
+    def init_old_model(self, ckpt_path=None):
+        """
+        Initialize teacher (old_model) as a frozen copy of student containing Domain A knowledge.
+        
+        在持续学习中，这非常关键：
+        - old_model = teacher = Domain A trained model (frozen, prevents forgetting)
+        - self = student = learning on Domain B (trainable, adapts to new domain)
+        
+        At this point, the student (self) should already have loaded Domain A weights
+        (via --resume or checkpoint loading), so deepcopy creates a teacher with
+        those Domain A weights.
+        
+        Args:
+            ckpt_path: Optional path to explicitly load Domain A checkpoint. 
+                      Usually not needed since student already loaded it.
+        """
+        self.old_model = deepcopy(self)  # ← Teacher gets Domain A weights from student
+        self.old_model.eval()             # ← Set to eval mode
+        for p in self.old_model.parameters():
+            p.requires_grad_(False)       # ← Freeze teacher
+        if ckpt_path is not None:
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            state_dict = ckpt.get('state_dict', ckpt)
+            
+            # If checkpoint has old_model.* keys, remap them to normal keys
+            # This handles checkpoints where all params were saved under old_model prefix
+            if any(k.startswith('old_model.') for k in state_dict.keys()):
+                remapped = {}
+                for k, v in state_dict.items():
+                    if k.startswith('old_model.'):
+                        # Strip "old_model." prefix
+                        new_k = k[len('old_model.'):]
+                        remapped[new_k] = v
+                    else:
+                        remapped[k] = v
+                state_dict = remapped
+            
+            self.old_model.load_state_dict(state_dict, strict=False)
 
     @torch.no_grad()
-    def set_old_model(self):
-        self.old_model = deepcopy(self)
-        self.old_model.eval()
-        for p in self.old_model.parameters():
-            p.requires_grad_(False)
+    def set_old_model(self, ckpt_path=None):
+        self.init_old_model(ckpt_path)
 
     def _forward_logits(self, inputs):
         if isinstance(inputs, (list, tuple)):
@@ -437,7 +476,11 @@ class MTStructContinual(EncoderDecoder):
         return torch.tensor(vals, device=device, dtype=torch.long)
 
     def loss(self, inputs, data_samples, train_cfg=None, **kwargs):
-        self.init_teacher()
+        # Auto-initialize old_model (teacher) on first training iteration
+        # old_model is a frozen copy of the student at this point
+        # It contains the Domain A knowledge learned during Stage 2
+        if self.old_model is None and hasattr(self, 'training') and self.training:
+            self.init_old_model()  # Creates frozen teacher from current student weights
 
         if isinstance(inputs, (list, tuple)):
             inputs = torch.stack(inputs, dim=0)
@@ -449,6 +492,21 @@ class MTStructContinual(EncoderDecoder):
         inputs_s = inputs
         inputs_w = self._stack_field(data_samples, "inputs_w", device=device, fallback=inputs_s)
         is_labeled = self._get_is_labeled(data_samples, device=device).long()
+
+        if self.warn_on_missing_unlabeled and self.training:
+            n_labeled = (is_labeled > 0).sum().item()
+            n_unlabeled = (is_labeled <= 0).sum().item()
+            if n_unlabeled == 0:
+                self._missing_unlabeled_streak += 1
+            else:
+                self._missing_unlabeled_streak = 0
+
+            if self._missing_unlabeled_streak == self.missing_unlabeled_warn_streak:
+                print(
+                    f"[WARNING] No unlabeled samples in batch for "
+                    f"{self._missing_unlabeled_streak} consecutive iterations "
+                    f"(latest batch: n_labeled={n_labeled}, n_unlabeled={n_unlabeled})"
+                )
 
         if inputs_s.dtype == torch.float32 and inputs_s.max() > 1.5:
             inputs_s = inputs_s / 255.0
@@ -489,13 +547,18 @@ class MTStructContinual(EncoderDecoder):
         # -------------------------
         idx_u = torch.where(is_labeled <= 0)[0]
         if idx_u.numel() > 0:
+            # Make sure old_model (teacher) is initialized
+            if self.old_model is None:
+                self.init_old_model()
+            
             assert inputs_w is not None, "Need inputs_w stored in data_samples for unlabeled batch."
 
-            inp_w = inputs_w[idx_u].float()  # teacher view (weak)
-            inp_s = inputs_s[idx_u].float()  # student view (strong)
+            inp_w = inputs_w[idx_u].float()  # weak view (input to teacher)
+            inp_s = inputs_s[idx_u].float()  # strong view (input to student)
 
             with torch.no_grad():
-                logits_t = self.teacher._forward_logits(inp_w)
+                # Teacher (old_model from Domain A) generates pseudo-labels
+                logits_t = self.old_model._forward_logits(inp_w)
                 p_t = _sigmoid(logits_t)  # [B,1,H,W]
 
                 # (A) selective weight map
@@ -633,15 +696,25 @@ class MTStructContinual(EncoderDecoder):
                 else:
                     w = w_sel.to(p_t.dtype) * w_diff
 
-                # else:
-                #     w = w_sel.to(p_t.dtype) * w_diff
-
-            # student forward
+            # Student (self) learns from teacher's (old_model's) pseudo-labels
             logits_s = self._forward_logits(inp_s)
             p_s = _sigmoid(logits_s)
 
             cons = (p_s - p_t).pow(2) * w
-            losses["loss_unsup"] = self.lam_u * (cons.sum() / (w.sum() + 1e-6))
-            losses["loss_skel"] = self.lam_skel * skel_consistency(p_s, p_t, w)
+            loss_unsup = self.lam_u * (cons.sum() / (w.sum() + 1e-6))
+            loss_skel = self.lam_skel * skel_consistency(p_s, p_t, w)
+            
+            losses["loss_unsup"] = loss_unsup
+            losses["loss_skel"] = loss_skel
+            
+            # DEBUG: Check loss values
+            # if loss_unsup.item() == 0.0 or loss_skel.item() == 0.0:
+                # print(f"[WARNING] Zero loss detected!")
+                # print(f"  loss_unsup={loss_unsup.item():.6f}, loss_skel={loss_skel.item():.6f}")
+                # print(f"  w.sum()={w.sum().item():.6f}, cons.sum()={cons.sum().item():.6f}")
+                # print(f"  p_s range: [{p_s.min():.4f}, {p_s.max():.4f}]")
+                # print(f"  p_t range: [{p_t.min():.4f}, {p_t.max():.4f}]")
+                # print(f"  w range: [{w.min():.4f}, {w.max():.4f}]")
+                # print(f"  n_unlabeled={idx_u.numel()}, w.shape={w.shape}")
 
         return losses

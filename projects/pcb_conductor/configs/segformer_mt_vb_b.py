@@ -5,6 +5,9 @@ custom_imports = dict(
     allow_failed_imports=False
 )
 
+# Resume from checkpoint (optional, explicitly set to None to skip)
+resume = False  # 禁用自动恢复，避免找不到checkpoint的警告
+
 data_preprocessor = dict(
     type='SegDataPreProcessor',
     size_divisor=32,   # ✅ 强制 pad/stack
@@ -63,6 +66,11 @@ train_dataloader = dict(
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='InfiniteSampler', shuffle=True),
+    batch_sampler=dict(
+        type='FixedRatioBatchSampler',
+        labeled_in_batch=1,
+        unlabeled_in_batch=1,
+    ),
     dataset=dict(
         type='DualStreamDataset',
         labeled_ratio=0.5,
@@ -86,18 +94,25 @@ val_dataloader = dict(
     num_workers=2,
     dataset=dict(
         type='PCBAConductorDataset',
-        data_root=f'{data_root}/A',
-        data_prefix=dict(img_path='images/val', seg_map_path='labels/val'),
+        data_root=f'{data_root}/B',
+        data_prefix=dict(img_path='images/test', seg_map_path='labels/test'),
+        img_suffix='.bmp',
+        seg_map_suffix='.jpg',
         pipeline=[
             dict(type='LoadImageFromFile'),
-            dict(type='Resize', scale=(1024, 1024), keep_ratio=False),
+            dict(type='Resize', scale=(256, 1024), keep_ratio=False),
             dict(type='LoadAnnotations'),
             dict(type='PackSegInputs')
         ]
     )
 )
-val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU', 'mDice', 'mFscore'])
+val_evaluator = dict(type='IoUMetric', iou_metrics=['mIoU', 'mDice', 'mFscore'], prefix='mmseg')
 val_cfg = dict()   # 可不写；但写一个空 dict 最稳
+
+# Test uses same config as validation
+test_dataloader = val_dataloader
+test_evaluator = val_evaluator
+test_cfg = val_cfg
 
 # ---------- model (SegFormer-B0) ----------
 norm_cfg = dict(type='SyncBN', requires_grad=True)
@@ -134,21 +149,22 @@ model = dict(
     test_cfg=dict(mode='slide', crop_size=(256, 1024), stride=(128, 768)),
     # test_cfg = dict(mode='whole'),
 
-    ema=0.99,
-    conf_thr=0.8,
+    conf_thr=0.5,  # 降低：从 0.8 -> 0.5，允许更多中等置信度的像素
     band_k=5,
     lam_u=1.0,
     lam_skel=0.3,
     lam_lwf=1.0,
-    use_lwf=False,
+    use_lwf=True,
     use_selective=True,
-    drop_boundary=True,
+    drop_boundary=False,  # 禁用：过度过滤了边界（PCB边界很重要）
     use_diffusion=True,
-    u_thr=0.12,
+    u_thr=0.25,  # 提高：从 0.12 -> 0.25，允许更高的不确定性
     diff_K=8,
     diff_steps=20,
     diff_down=2,
-    diff_ckpt='work_dirs/mask_ddpm_min/unet_llm.pth',
+    diff_ckpt='work_dirs/continual_experiment/stage1_diffusion_pretraining/unet_llm.pth',
+    judge_thr=0.0,  # Keep judge as a soft weight; do not hard-drop early B pseudo-labels.
+    warn_on_missing_unlabeled=True,
 )
 
 # test_dataloader = val_dataloader
@@ -170,7 +186,7 @@ default_hooks = dict(
         interval=500,       # 每 1000 iter 保存
         max_keep_ckpts=10,   # 防止磁盘爆
         save_last=True,
-        save_best='mDice',   # 或 'mIoU'
+        save_best='mmseg/mDice',   # 需要包括prefix前缀
         rule='greater'
     ),
     logger=dict(type='LoggerHook', interval=50)
